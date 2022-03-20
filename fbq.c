@@ -138,6 +138,7 @@ void moveIncomingProcesses(void) {
     while (nextProcess < numberOfProcesses && processes[nextProcess].arrivalTime <= simulationTime) {
         preReadyQueue[preReadyQueueSize] = &processes[nextProcess];
         //preReadyQueue[preReadyQueueSize]->priority = 0;
+        //preReadyQueue[preReadyQueueSize]->quantumRemaining = timeQuantums[0];
         preReadyQueueSize++;
         nextProcess++;
     }
