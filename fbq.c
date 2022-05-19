@@ -14,6 +14,7 @@ YorkU email address (the one that appears in eClass): nhatnam@my.yorku.ca
 
 #include "sch-helpers.h" /* include header file of all helper functions */
 #define NUMBER_OF_LEVELS 3
+
 /* Declare some global variables and structs to be used by FCFS scheduler */
 
 process processes[MAX_PROCESSES+1]; /* a large array to hold all processes read
@@ -31,11 +32,12 @@ int simulationTime; /* time steps simulated */
 int cpuTimeUtilized; /* time steps each cpu was executing */
 
 int timeQuantums[NUMBER_OF_LEVELS-1];
-int currentLevel;
 
 /* holds processes moving to the ready queue this timestep (for sorting) */
 process *preReadyQueue[MAX_PROCESSES+1];
 int preReadyQueueSize;
+
+int runningCPU;
 
 /** Initialization functions **/
 
@@ -52,11 +54,12 @@ void initializeGlobals(void) {
     totalContextSwitches = 0;
     numberOfProcesses = 0;
     nextProcess = 0;
-    
-    currentLevel = 0;
-    preReadyQueueSize = 0;
 
-    for (i=0;i<NUMBER_OF_LEVELS;i++){ 
+    preReadyQueueSize = 0;
+    
+    // runningCPU = 0;
+
+    for (i=0;i<NUMBER_OF_LEVELS;i++){
         initializeProcessQueue(&readyQueue[i]);
     }
     initializeProcessQueue(&waitingQueue);
@@ -79,24 +82,14 @@ int compareProcessPointers(const void *aa, const void *bb) {
     return 0;
 }
 
-/**
- * Compare priorities of two processes
- */
-int comparePriority(const void *a, const void *b){
-	process *first = (process *) a;
-	process *second = (process *) b;
-	if (first->priority == second->priority){
-		return compareProcessPointers(first, second);
-	}
-	return first->priority - second->priority;
-}
-
 /* returns the number of processes currently executing on processors */
 int runningProcesses(void) {
     int result = 0;
     int i;
     for (i=0;i<NUMBER_OF_PROCESSORS;i++) {
-        if (cpus[i] != NULL) result++;
+        if (cpus[i] != NULL) {
+            result++;
+        }
     }
     return result;
 }
@@ -113,32 +106,36 @@ process *nextScheduledProcess(void) {
     int readyQueueSize1 = readyQueue[0].size;
 	int readyQueueSize2 = readyQueue[1].size;
 	int readyQueueSize3 = readyQueue[2].size;
-	process *grabNext;
-	
+	process *front;
+
+	if (readyQueueSize1 == 0 && readyQueueSize2 == 0 && readyQueueSize3 == 0){
+        return NULL;
+    }
+
 	if (readyQueueSize1 != 0){
-		grabNext = readyQueue[0].front->data;
+		front = readyQueue[0].front->data;
 		dequeueProcess(&readyQueue[0]);
 	}
 	else if (readyQueueSize2 != 0){
-		grabNext = readyQueue[1].front->data;
+		front = readyQueue[1].front->data;
 		dequeueProcess(&readyQueue[1]);
 	} 
 	else if (readyQueueSize3 != 0){
-		grabNext = readyQueue[2].front->data;
+		front = readyQueue[2].front->data;
 		dequeueProcess(&readyQueue[2]);
 	}
-	return grabNext; 
+    return front;
+
 }
 
 /* enqueue newly arriving processes in the ready queue */
 void moveIncomingProcesses(void) {
     /* place newly arriving processes into an intermediate array
     so that they will be sorted by priority and added to the ready queue */
-    printf("moveIncoming\n");
+    //Condition: as long as the next process does not exceed the total number of processes AND the arrivalTime of the process does not exceed total simulationTime
     while (nextProcess < numberOfProcesses && processes[nextProcess].arrivalTime <= simulationTime) {
         preReadyQueue[preReadyQueueSize] = &processes[nextProcess];
-        //preReadyQueue[preReadyQueueSize]->priority = 0;
-        //preReadyQueue[preReadyQueueSize]->quantumRemaining = timeQuantums[0];
+        preReadyQueue[preReadyQueueSize]->quantumRemaining = timeQuantums[0];
         preReadyQueueSize++;
         nextProcess++;
     }
@@ -146,16 +143,14 @@ void moveIncomingProcesses(void) {
 
 /* move any waiting processes that are finished their I/O bursts to ready */
 void moveWaitingProcesses(void) {
-    printf("moveWaiting\n");
+    // printf("moveWaiting\n");
     int i;
     int size = waitingQueue.size;
- 
+
     /* place processes finished their I/O bursts into an intermediate array
     so that they will be sorted by priority and added to the ready queue */
     for (i=0;i<size;i++) {
         process *front = waitingQueue.front->data; /* get process at front */
-        front->priority = 0;
- 		front->quantumRemaining = 0;
         dequeueProcess(&waitingQueue); /* dequeue it */
 
         assert(front->bursts[front->currentBurst].step <=
@@ -168,7 +163,9 @@ void moveWaitingProcesses(void) {
             /* switch to next (CPU) burst and place in ready queue */
             front->currentBurst++;
             
-            //NEW
+            //Processes from waiting queue have quantumRemaining reset
+            front->quantumRemaining = timeQuantums[0];
+            front->currentQueue = 0;
  			front->endTime = simulationTime;
 
             preReadyQueue[preReadyQueueSize++] = front;
@@ -178,143 +175,382 @@ void moveWaitingProcesses(void) {
     }
 }
 
-/**
- * Sort elements in "pre-ready queue" in order to add them to the ready queue
- * in the proper order. Enqueue all processes in "pre-ready queue" to ready queue.
- * Reset "pre-ready queue" size to 0. Find a CPU that doesn't have a process currently 
- * running on it and schedule the next process on that CPU
- */
+/* move ready processes into free cpus according to scheduling algorithm */
 void moveReadyProcesses(void) {
     int i;
-    printf("moveReady\n");
-    /* sort processes in the intermediate preReadyQueue array by pid,
-    and add them to the ready queue prior to moving ready procs. into cpus */
-    
-            qsort(preReadyQueue, preReadyQueueSize, sizeof(process*),compareProcessPointers);
-            for (i=0;i<preReadyQueueSize;i++) {
-                enqueueProcess(&readyQueue[0], preReadyQueue[i]);
-                preReadyQueue[i]=NULL;
-            }
-            preReadyQueueSize = 0;
-    
 
+    /* sort processes in the intermediate preReadyQueue array by pid,
+    and add them to the ready queue prior to moving ready procs. into CPUs */
+    qsort(preReadyQueue, preReadyQueueSize, sizeof(process*),compareProcessPointers);
+    for (i=0;i<preReadyQueueSize;i++) {
+        enqueueProcess(&readyQueue[0], preReadyQueue[i]);
+        preReadyQueue[i] = NULL; //???
+    }
+    preReadyQueueSize = 0;
+    
     /* for each idle cpu, load and begin executing
     the next scheduled process from the ready queue. */
     for (i=0;i<NUMBER_OF_PROCESSORS;i++) {
         if (cpus[i] == NULL) {
-            cpus[i] = nextScheduledProcess();
+            process *nextProcess = nextScheduledProcess();
+            cpus[i] = nextProcess;
         }
     }
 }
 
-/**
- * Check all cases; first that the first time slice hasn't expired, if it has then move
- * process to the second level. Run the process on that level, if the time slice expires
- * then move it to the fcfs part of the algorithm. There it will operate as a regular fcfs
- * algorithm, processing each process in a first come first serve manner.
- */
+/* move any running processes that have finished their CPU burst to waiting,
+and terminate those that have finished their last CPU burst. */
 void moveRunningProcesses(void) {
-    printf("moveRunning\n");
-    int readyQueueSize1 = readyQueue[0].size;
-	int readyQueueSize2 = readyQueue[1].size;
-	int readyQueueSize3 = readyQueue[2].size;
- 	int i;
- 	
- 	for (i = 0; i < NUMBER_OF_PROCESSORS; i++){
- 		if (cpus[i] != NULL){
- 			if (cpus[i]->bursts[cpus[i]->currentBurst].step != cpus[i]->bursts[cpus[i]->currentBurst].length 
- 				&& cpus[i]->quantumRemaining != timeQuantums[0] && cpus[i]->priority == 0){
- 				cpus[i]->quantumRemaining++;
- 				cpus[i]->bursts[cpus[i]->currentBurst].step++;
-                 printf("CPU not Leaving1\n");
- 			}
- 			else if(cpus[i]->bursts[cpus[i]->currentBurst].step != cpus[i]->bursts[cpus[i]->currentBurst].length 
- 				&& cpus[i]->quantumRemaining == timeQuantums[0] && cpus[i]->priority == 0){
- 				cpus[i]->quantumRemaining = 0;
- 				cpus[i]->priority = 1;
- 				totalContextSwitches++;
- 				enqueueProcess(&readyQueue[1], cpus[i]);
- 				cpus[i] = NULL;
-                 printf("CPU Leaving1\n");
- 			}
- 			else if(cpus[i]->bursts[cpus[i]->currentBurst].step != cpus[i]->bursts[cpus[i]->currentBurst].length 
- 				&& cpus[i]->quantumRemaining != timeQuantums[1] && cpus[i]->priority == 1){
- 				if (readyQueueSize1 != 0){
- 					cpus[i]->quantumRemaining = 0;
- 					totalContextSwitches++;
- 					enqueueProcess(&readyQueue[1], cpus[i]);
- 					cpus[i] = NULL;
-                     printf("CPU Leaving2\n");
- 				}
- 				else{
- 					cpus[i]->bursts[cpus[i]->currentBurst].step++;
- 					cpus[i]->quantumRemaining++;
-                      printf("CPU not Leaving2\n");
- 				}
- 			}
- 			else if(cpus[i]->bursts[cpus[i]->currentBurst].step != cpus[i]->bursts[cpus[i]->currentBurst].length 
- 				&& cpus[i]->quantumRemaining == timeQuantums[1] && cpus[i]->priority == 1){
- 				cpus[i]->quantumRemaining = 0;
- 				cpus[i]->priority = 2;
- 				totalContextSwitches++;
- 				enqueueProcess(&readyQueue[2], cpus[i]);
- 				cpus[i] = NULL;
-                 printf("CPU Leaving3\n");
- 			}
- 			else if(cpus[i]->bursts[cpus[i]->currentBurst].step != cpus[i]->bursts[cpus[i]->currentBurst].length 
- 				&& cpus[i]->priority == 2){
- 				if (readyQueueSize1 != 0 || readyQueueSize2 != 0){
- 					cpus[i]->quantumRemaining = 0;
- 					totalContextSwitches++;
- 					enqueueProcess(&readyQueue[2], cpus[i]);
- 					cpus[i] = NULL;
-                    printf("CPU Leaving4\n");
- 				}
- 				else{
- 					cpus[i]->bursts[cpus[i]->currentBurst].step++;
-                      printf("CPU not Leaving3\n");
- 				}
- 			}
- 			// fcfs part of the algorithm
- 			else if (cpus[i]->bursts[cpus[i]->currentBurst].step == cpus[i]->bursts[cpus[i]->currentBurst].length){
- 				cpus[i]->currentBurst++;
- 				cpus[i]->quantumRemaining = 0;
- 				cpus[i]->priority = 0;
- 				if(cpus[i]->currentBurst < cpus[i]->numberOfBursts){
- 					enqueueProcess(&waitingQueue, cpus[i]);
- 				}
- 				else{
- 					cpus[i]->endTime = simulationTime;
- 				}
- 				cpus[i] = NULL;
-                printf("CPU Leaving5\n");
- 			}
- 		}
- 		// if the CPU is free, assign it work
- 		else if (cpus[i] == NULL){
- 			if(readyQueueSize1 != 0){
- 				process *front = readyQueue[0].front->data;
- 				dequeueProcess(&readyQueue[0]);
- 				cpus[i] = front;
- 				cpus[i]->bursts[cpus[i]->currentBurst].step++;
- 				cpus[i]->quantumRemaining++;
-			}
-			else if(readyQueueSize2 != 0){
- 				process *front = readyQueue[1].front->data;
- 				dequeueProcess(&readyQueue[1]);
- 				cpus[i] = front;
- 				cpus[i]->bursts[cpus[i]->currentBurst].step++;
- 				cpus[i]->quantumRemaining++;
- 			}
- 			else if(readyQueueSize3 != 0){
- 				process *front = readyQueue[2].front->data;
- 				dequeueProcess(&readyQueue[2]);
- 				cpus[i] = front;
- 				cpus[i]->bursts[cpus[i]->currentBurst].step++;
- 				cpus[i]->quantumRemaining = 0;
- 			}
- 		}	
- 	}
+    int i,j,k;
+    process *preemptive1[NUMBER_OF_PROCESSORS];
+    process *preemptive2[NUMBER_OF_PROCESSORS];
+    int num1 = 0;
+    int num2 = 0;
+    
+    for (i=0;i<NUMBER_OF_PROCESSORS;i++) {
+        //if more than one cpu core is working but not all cpu cores are working
+        if (runningProcesses() < NUMBER_OF_PROCESSORS) {
+            if (cpus[i] != NULL){
+               if (cpus[i]->currentQueue == 0 || cpus[i]->currentQueue == 1){
+               if (cpus[i]->bursts[cpus[i]->currentBurst].step == cpus[i]->bursts[cpus[i]->currentBurst].length) {
+                    /* start process' next (I/O) burst */
+                    cpus[i]->currentBurst++;
+
+                    /* move process to waiting queue if it is not finished */
+                    if (cpus[i]->currentBurst < cpus[i]->numberOfBursts) {
+                        enqueueProcess(&waitingQueue, cpus[i]);
+
+                    /* otherwise (if currentBurts has reached its input total numberOfBursts), terminate it (don't put it back in the queue) */
+                    } else {
+                        cpus[i]->endTime = simulationTime;
+                    }
+
+                    /* stop executing the process
+                    -since this will remove the process from the cpu immediately,
+                    but the process is supposed to stop running at the END of
+                    the current time step, we need to add 1 to the runtime */
+                    cpus[i] = NULL;
+                }
+                /*if the process CPU bursts is not finished BUT the timeQuantum has reached 0, move the unfinished process to the preemptive buffer array for READY queue and reset its timeQuantum to the old user-inputted timeQuantum*/
+                else if (cpus[i]->quantumRemaining == 0){
+                    if (cpus[i]->currentQueue == 0){
+                        preemptive1[num1] = cpus[i];
+                        preemptive1[num1]->quantumRemaining = timeQuantums[1];
+                        preemptive1[num1]->currentQueue = 1;
+                        num1++;
+                        totalContextSwitches++;
+                        cpus[i] = NULL;
+                    }
+                    else if (cpus[i]->currentQueue == 1){
+                        preemptive2[num2] = cpus[i];
+                        preemptive2[num2]->currentQueue = 2;
+                        num2++;
+                        totalContextSwitches++;
+                        cpus[i] = NULL;
+                    }
+                }
+               }
+               else if (cpus[i]->currentQueue == 2){
+                   if (cpus[i]->bursts[cpus[i]->currentBurst].step == cpus[i]->bursts[cpus[i]->currentBurst].length) {
+                    /* start process' next (I/O) burst */
+                    cpus[i]->currentBurst++;
+
+                    /* move process to waiting queue if it is not finished */
+                    if (cpus[i]->currentBurst < cpus[i]->numberOfBursts) {
+                        enqueueProcess(&waitingQueue, cpus[i]);
+
+                    /* otherwise (if currentBurts has reached its input total numberOfBursts), terminate it (don't put it back in the queue) */
+                    } else {
+                        cpus[i]->endTime = simulationTime;
+                    }
+
+                    /* stop executing the process
+                    -since this will remove the process from the cpu immediately,
+                    but the process is supposed to stop running at the END of
+                    the current time step, we need to add 1 to the runtime */
+                    cpus[i] = NULL;
+                }
+               }
+            }
+        }
+        /*if the CPU bursts has not finished AND the remaining timeQuantum has not reached 0 BUT all cores were occupied AND there is a higher priority process than the one running */
+        else if (runningProcesses()== NUMBER_OF_PROCESSORS){
+            if (cpus[i] != NULL){
+            if (readyQueue[0].size != 0){
+                if (cpus[i]->currentQueue == 1){
+                    if (readyQueue[0].size != 0){
+                        preemptive1[num1] = cpus[i];
+                        preemptive1[num1]->quantumRemaining = timeQuantums[1];
+                        num1++;
+                        totalContextSwitches++;
+                        cpus[i] = NULL;
+                    }
+                }
+                else if (cpus[i]->currentQueue == 2){
+                    if (readyQueue[0].size != 0){
+                        preemptive2[num2] = cpus[i];
+                        num2++;
+                        totalContextSwitches++;
+                        cpus[i] = NULL;
+                    }
+                }
+                else if (cpus[i]->currentQueue == 0){
+                    /* if process' current (CPU) burst is finished BUT the timeQuantum has not reached 0, terminating the process(meanwhile, step will still increment and timeQuantum will decrement)*/ 
+                    printf("When Equal 4 readyQ 0 not 0, pid %d Queue %d CurrentBurst %d Step %d Length %d\n",cpus[i]->pid, cpus[i]->currentQueue, cpus[i]->currentBurst, cpus[i]->bursts[cpus[i]->currentBurst].step,cpus[i]->bursts[cpus[i]->currentBurst].length);
+                    if (cpus[i]->bursts[cpus[i]->currentBurst].step == cpus[i]->bursts[cpus[i]->currentBurst].length) {
+                        printf("Before %d\n", runningProcesses());
+                        /* start process' next (I/O) burst */
+                        cpus[i]->currentBurst++;
+
+                        /* move process to waiting queue if it is not finished */
+                        if (cpus[i]->currentBurst < cpus[i]->numberOfBursts) {
+                            enqueueProcess(&waitingQueue, cpus[i]);
+
+                        /* otherwise (if currentBurts has reached its input total numberOfBursts), terminate it (don't put it back in the queue) */
+                        } else {
+                            cpus[i]->endTime = simulationTime;
+                        }
+
+                        /* stop executing the process
+                        -since this will remove the process from the cpu immediately,
+                        but the process is supposed to stop running at the END of
+                        the current time step, we need to add 1 to the runtime */
+                        cpus[i] = NULL;
+                    }
+                    /*if the process CPU bursts is not finished BUT the timeQuantum has reached 0, move the unfinished process to the preemptive buffer array for READY queue and reset its timeQuantum to the old user-inputted timeQuantum*/
+                    else if (cpus[i]->quantumRemaining == 0){
+                        if (cpus[i]->currentQueue == 0){
+                            preemptive1[num1] = cpus[i];
+                            preemptive1[num1]->quantumRemaining = timeQuantums[1];
+                            preemptive1[num1]->currentQueue = 1;
+                            num1++;
+                            totalContextSwitches++;
+                            cpus[i] = NULL;
+                        }
+                        else if (cpus[i]->currentQueue == 1){
+                            printf("Before %d\n", runningProcesses());
+                            preemptive2[num2] = cpus[i];
+                            preemptive2[num2]->currentQueue = 2;
+                            num2++;
+                            totalContextSwitches++;
+                            cpus[i] = NULL;
+                        }
+                    }
+                }
+            }
+            else if (readyQueue[1].size != 0){
+                if (cpus[i]->currentQueue == 1){
+                    printf("When Equal 4 ReadyQ 1 not 0, pid %d Queue %d CurrentBurst %d Step %d Length %d\n",cpus[i]->pid, cpus[i]->currentQueue, cpus[i]->currentBurst, cpus[i]->bursts[cpus[i]->currentBurst].step,cpus[i]->bursts[cpus[i]->currentBurst].length);
+                    /* if process' current (CPU) burst is finished BUT the timeQuantum has not reached 0, terminating the process(meanwhile, step will still increment and timeQuantum will decrement)*/ 
+                    if (cpus[i]->bursts[cpus[i]->currentBurst].step == cpus[i]->bursts[cpus[i]->currentBurst].length) {
+                        printf("Before %d\n", runningProcesses());
+                        /* start process' next (I/O) burst */
+                        cpus[i]->currentBurst++;
+
+                        /* move process to waiting queue if it is not finished */
+                        if (cpus[i]->currentBurst < cpus[i]->numberOfBursts) {
+                            enqueueProcess(&waitingQueue, cpus[i]);
+                        /* otherwise (if currentBurts has reached its input total numberOfBursts), terminate it (don't put it back in the queue) */
+                        } else {
+                            cpus[i]->endTime = simulationTime;
+                        }
+
+                        /* stop executing the process
+                        -since this will remove the process from the cpu immediately,
+                        but the process is supposed to stop running at the END of
+                        the current time step, we need to add 1 to the runtime */
+                        cpus[i] = NULL;
+
+                    }
+                    /*if the process CPU bursts is not finished BUT the timeQuantum has reached 0, move the unfinished process to the preemptive buffer array for READY queue and reset its timeQuantum to the old user-inputted timeQuantum*/
+                    else if (cpus[i]->quantumRemaining == 0){
+                        if (cpus[i]->currentQueue == 0){
+                            preemptive1[num1] = cpus[i];
+                            preemptive1[num1]->quantumRemaining = timeQuantums[1];
+                            preemptive1[num1]->currentQueue = 1;
+                            num1++;
+                            totalContextSwitches++;
+                            cpus[i] = NULL;
+                        }
+                        else if (cpus[i]->currentQueue == 1){
+                            preemptive2[num2] = cpus[i];
+                            preemptive2[num2]->currentQueue = 2;
+                            num2++;
+                            totalContextSwitches++;
+                            cpus[i] = NULL;
+                        }
+                    }
+                }
+                else if (cpus[i]->currentQueue == 2){
+                    if (readyQueue[1].size != 0){
+                        preemptive2[num2] = cpus[i];
+                        num2++;
+                        totalContextSwitches++;
+                        cpus[i] = NULL;
+                    }
+                }
+                else if (cpus[i]->currentQueue == 0){
+                    printf("When Equal 4 readyQ 1 not 0, pid %d Queue %d CurrentBurst %d Step %d Length %d\n",cpus[i]->pid, cpus[i]->currentQueue, cpus[i]->currentBurst, cpus[i]->bursts[cpus[i]->currentBurst].step,cpus[i]->bursts[cpus[i]->currentBurst].length);
+                    /* if process' current (CPU) burst is finished BUT the timeQuantum has not reached 0, terminating the process(meanwhile, step will still increment and timeQuantum will decrement)*/ 
+                    if (cpus[i]->bursts[cpus[i]->currentBurst].step == cpus[i]->bursts[cpus[i]->currentBurst].length) {
+                        /* start process' next (I/O) burst */
+                        cpus[i]->currentBurst++;
+
+                        /* move process to waiting queue if it is not finished */
+                        if (cpus[i]->currentBurst < cpus[i]->numberOfBursts) {
+                            enqueueProcess(&waitingQueue, cpus[i]);
+
+                        /* otherwise (if currentBurts has reached its input total numberOfBursts), terminate it (don't put it back in the queue) */
+                        } else {
+                            cpus[i]->endTime = simulationTime;
+                        }
+
+                        /* stop executing the process
+                        -since this will remove the process from the cpu immediately,
+                        but the process is supposed to stop running at the END of
+                        the current time step, we need to add 1 to the runtime */
+                        cpus[i] = NULL;
+                    }
+                    /*if the process CPU bursts is not finished BUT the timeQuantum has reached 0, move the unfinished process to the preemptive buffer array for READY queue and reset its timeQuantum to the old user-inputted timeQuantum*/
+                    else if (cpus[i]->quantumRemaining == 0){
+                        if (cpus[i]->currentQueue == 0){
+                            preemptive1[num1] = cpus[i];
+                            preemptive1[num1]->quantumRemaining = timeQuantums[1];
+                            preemptive1[num1]->currentQueue = 1;
+                            num1++;
+                            totalContextSwitches++;
+                            cpus[i] = NULL;
+                        }
+                        else if (cpus[i]->currentQueue == 1){
+                            preemptive2[num2] = cpus[i];
+                            preemptive2[num2]->currentQueue = 2;
+                            num2++;
+                            totalContextSwitches++;
+                            cpus[i] = NULL;
+                        }
+                    }
+                }
+            }
+            else if (readyQueue[2].size !=0){
+                /* if process' current (CPU) burst is finished BUT the timeQuantum has not reached 0, terminating the process(meanwhile, step will still increment and timeQuantum will decrement)*/ 
+                if (cpus[i]->currentQueue==0 || cpus[i]->currentQueue==1){
+                    /* if process' current (CPU) burst is finished BUT the timeQuantum has not reached 0, terminating the process(meanwhile, step will still increment and timeQuantum will decrement)*/ 
+                    printf("When Equal 4 ReadyQ 2 not 0, pid %d Queue %d CurrentBurst %d Step %d Length %d\n",cpus[i]->pid, cpus[i]->currentQueue, cpus[i]->currentBurst, cpus[i]->bursts[cpus[i]->currentBurst].step,cpus[i]->bursts[cpus[i]->currentBurst].length);
+                    if (cpus[i]->bursts[cpus[i]->currentBurst].step == cpus[i]->bursts[cpus[i]->currentBurst].length) {
+                        /* start process' next (I/O) burst */
+                        cpus[i]->currentBurst++;
+
+                        /* move process to waiting queue if it is not finished */
+                        if (cpus[i]->currentBurst < cpus[i]->numberOfBursts) {
+                            enqueueProcess(&waitingQueue, cpus[i]);
+
+                        /* otherwise (if currentBurts has reached its input total numberOfBursts), terminate it (don't put it back in the queue) */
+                        } else {
+                            cpus[i]->endTime = simulationTime;
+                        }
+
+                        /* stop executing the process
+                        -since this will remove the process from the cpu immediately,
+                        but the process is supposed to stop running at the END of
+                        the current time step, we need to add 1 to the runtime */
+                        cpus[i] = NULL;
+                    }
+                    /*if the process CPU bursts is not finished BUT the timeQuantum has reached 0, move the unfinished process to the preemptive buffer array for READY queue and reset its timeQuantum to the old user-inputted timeQuantum*/
+                    else if (cpus[i]->quantumRemaining == 0){
+                        if (cpus[i]->currentQueue == 0){
+                            preemptive1[num1] = cpus[i];
+                            preemptive1[num1]->quantumRemaining = timeQuantums[1];
+                            preemptive1[num1]->currentQueue = 1;
+                            num1++;
+                            totalContextSwitches++;
+                            cpus[i] = NULL;
+                        }
+                        else if (cpus[i]->currentQueue == 1){
+                            preemptive2[num2] = cpus[i];
+                            preemptive2[num2]->currentQueue = 2;
+                            num2++;
+                            totalContextSwitches++;
+                            cpus[i] = NULL;
+                        }
+                    }
+                }
+                else if (cpus[i]->currentQueue == 2){
+                    printf("Equal 4, pid %d Queue %d CurrentBurst %d Step %d Length %d\n",cpus[i]->pid, cpus[i]->currentQueue, cpus[i]->currentBurst, cpus[i]->bursts[cpus[i]->currentBurst].step,cpus[i]->bursts[cpus[i]->currentBurst].length);
+                    if (cpus[i]->bursts[cpus[i]->currentBurst].step == cpus[i]->bursts[cpus[i]->currentBurst].length) {
+                        /* start process' next (I/O) burst */
+                        cpus[i]->currentBurst++;
+
+                        /* move process to waiting queue if it is not finished */
+                        if (cpus[i]->currentBurst < cpus[i]->numberOfBursts) {
+                            enqueueProcess(&waitingQueue, cpus[i]);
+
+                        /* otherwise (if currentBurts has reached its input total numberOfBursts), terminate it (don't put it back in the queue) */
+                        } else {
+                            cpus[i]->endTime = simulationTime;
+                        }
+
+                        /* stop executing the process
+                        -since this will remove the process from the cpu immediately,
+                        but the process is supposed to stop running at the END of
+                        the current time step, we need to add 1 to the runtime */
+                        cpus[i] = NULL;
+                    }
+                }   
+            }
+            else {
+                if (cpus[i] != NULL){
+                    /* if process' current (CPU) burst is finished BUT the timeQuantum has not reached 0, terminating the process(meanwhile, step will still increment and timeQuantum will decrement)*/ 
+                    printf("When Equal 4 all readyQ 0, pid %d Queue %d CurrentBurst %d Step %d Length %d\n",cpus[i]->pid, cpus[i]->currentQueue, cpus[i]->currentBurst, cpus[i]->bursts[cpus[i]->currentBurst].step,cpus[i]->bursts[cpus[i]->currentBurst].length);
+                    if (cpus[i]->bursts[cpus[i]->currentBurst].step == cpus[i]->bursts[cpus[i]->currentBurst].length) {
+                        /* start process' next (I/O) burst */
+                        cpus[i]->currentBurst++;
+
+                        /* move process to waiting queue if it is not finished */
+                        if (cpus[i]->currentBurst < cpus[i]->numberOfBursts) {
+                            enqueueProcess(&waitingQueue, cpus[i]);
+
+                        /* otherwise (if currentBurts has reached its input total numberOfBursts), terminate it (don't put it back in the queue) */
+                        } else {
+                            cpus[i]->endTime = simulationTime;
+                        }
+
+                        /* stop executing the process
+                        -since this will remove the process from the cpu immediately,
+                        but the process is supposed to stop running at the END of
+                        the current time step, we need to add 1 to the runtime */
+                        cpus[i] = NULL;
+                    }
+                    /*if the process CPU bursts is not finished BUT the timeQuantum has reached 0, move the unfinished process to the preemptive buffer array for READY queue and reset its timeQuantum to the old user-inputted timeQuantum*/
+                    else if (cpus[i]->quantumRemaining == 0){
+                        if (cpus[i]->currentQueue == 0){
+                            preemptive1[num1] = cpus[i];
+                            preemptive1[num1]->quantumRemaining = timeQuantums[1];
+                            preemptive1[num1]->currentQueue = 1;
+                            num1++;
+                            totalContextSwitches++;
+                            cpus[i] = NULL;
+                        }
+                        else if (cpus[i]->currentQueue == 1){
+                            preemptive2[num2] = cpus[i];
+                            preemptive2[num2]->currentQueue = 2;
+                            num2++;
+                            totalContextSwitches++;
+                            cpus[i] = NULL;
+                        }
+                    }
+                }
+            }
+            }
+        }
+    }
+    qsort(preemptive1, num1, sizeof(process*), compareProcessPointers);
+    qsort(preemptive2, num2, sizeof(process*), compareProcessPointers);
+    for (j=0; j < num1; j++){
+        enqueueProcess(&readyQueue[1], preemptive1[j]);
+    }
+    for (k=0; k < num2; k++){
+        enqueueProcess(&readyQueue[2], preemptive2[k]);
+    }
 }
 
 /* increment each waiting process' current I/O burst's progress */
@@ -335,7 +571,7 @@ void updateWaitingProcesses(void) {
 void updateReadyProcesses(void) {
     int i,j;
     for (i=0;i<NUMBER_OF_LEVELS;i++){
-        for (j=0;i<readyQueue[i].size;i++) {
+        for (j=0;j<readyQueue[i].size;j++) {
             process *front = readyQueue[i].front->data; /* get process at front */
             dequeueProcess(&readyQueue[i]); /* dequeue it */
             front->waitingTime++; /* increment waiting time */
@@ -345,16 +581,22 @@ void updateReadyProcesses(void) {
 }
 
 /* update the progress for all currently executing processes */
-// void updateRunningProcesses(void) {
-//     int i;
-//     for (i=0;i<NUMBER_OF_PROCESSORS;i++) {
-//         if (cpus[i] != NULL) {
-//         /* increment the current (CPU) burst's step (progress) */
-//             cpus[i]->bursts[cpus[i]->currentBurst].step++;
-//             cpus[i]->quantumRemaining--;
-//         }
-//     }
-// }
+void updateRunningProcesses(void) {
+    int i;
+    for (i=0;i<NUMBER_OF_PROCESSORS;i++) {
+        if (cpus[i] != NULL) {
+        /* increment the current (CPU) burst's step (progress) and decrement quantumRemaining for q0 and q1 processes */
+            //printf("updateRunning\n");
+            if (cpus[i]->currentQueue == 0 || cpus[i]->currentQueue == 1){
+                cpus[i]->bursts[cpus[i]->currentBurst].step++;
+                cpus[i]->quantumRemaining--;
+            }
+            else if (cpus[i]->currentQueue == 2 ){
+                cpus[i]->bursts[cpus[i]->currentBurst].step++;
+            }
+        }
+    }
+}
 
 int main(int argc, char *argv[]) {
     int sumOfTurnaroundTimes = 0;
@@ -362,7 +604,8 @@ int main(int argc, char *argv[]) {
     int i;
     timeQuantums[0] = atoi(argv[1]);
     timeQuantums[1] = atoi(argv[2]);
-
+    
+    
     /* read in all process data and populate processes array with the results */
     initializeGlobals();
     while (doneReading=readProcess(&processes[numberOfProcesses])) {
@@ -386,16 +629,13 @@ int main(int argc, char *argv[]) {
     /* run the simulation */
     while (1) {
         moveIncomingProcesses(); /* admit any newly arriving processes */
-        // moveRunningProcesses(); /* move procs that shouldn't be running */
-        // moveWaitingProcesses(); /* move procs finished waiting to ready-Q */
-        // moveReadyProcesses(); /* move ready procs into any free cpu slots */
-        moveReadyProcesses();
-        moveRunningProcesses();
-        moveWaitingProcesses();
+        moveRunningProcesses(); /* move procs that shouldn't be running */
+        moveWaitingProcesses(); /* move procs finished waiting to ready-Q */
+        moveReadyProcesses(); /* move ready procs into any free cpu slots */
 
         updateWaitingProcesses(); /* update burst progress for waiting procs */
         updateReadyProcesses(); /* update waiting time for ready procs */
-        //updateRunningProcesses(); /* update burst progress for running procs */
+        updateRunningProcesses(); /* update burst progress for running procs */
 
         cpuTimeUtilized += runningProcesses();
 
@@ -404,10 +644,9 @@ int main(int argc, char *argv[]) {
         - no more processes await entry into the system
         - there are no waiting processes
         */
-        printf("%d %d %d\n",runningProcesses(),incomingProcesses(),waitingQueue.size);
-        if (runningProcesses() == 0 && incomingProcesses() == 0 && waitingQueue.size == 0) {
-            break;
-        }
+        //printf("Running %d\n",runningProcesses());
+        if (runningProcesses() == 0 &&incomingProcesses() == 0 && waitingQueue.size == 0) break;
+        
         simulationTime++;
     }
 

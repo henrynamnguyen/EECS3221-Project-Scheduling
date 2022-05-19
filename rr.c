@@ -149,11 +149,10 @@ void moveWaitingProcesses(void) {
 /* move ready processes into free cpus according to scheduling algorithm */
 void moveReadyProcesses(void) {
     int i;
-
+    
     /* sort processes in the intermediate preReadyQueue array by pid,
     and add them to the ready queue prior to moving ready procs. into CPUs */
-    qsort(preReadyQueue, preReadyQueueSize, sizeof(process*),
-    compareProcessPointers);
+    qsort(preReadyQueue, preReadyQueueSize, sizeof(process*),compareProcessPointers);
     for (i=0;i<preReadyQueueSize;i++) {
         enqueueProcess(&readyQueue, preReadyQueue[i]);
         preReadyQueue[i] = NULL; //???
@@ -178,7 +177,7 @@ void moveRunningProcesses(void) {
     for (i=0;i<NUMBER_OF_PROCESSORS;i++) {
         //if the cpu core is working
         if (cpus[i] != NULL) {
-        /* if process' current (CPU) burst is finished , meanwhile if its not finished, step will still increment and timeQuantum will decrement*/ 
+        /* if process' current (CPU) burst is finished , meanwhile, step will still increment and timeQuantum will decrement*/ 
             if (cpus[i]->bursts[cpus[i]->currentBurst].step == cpus[i]->bursts[cpus[i]->currentBurst].length) {
 
                 /* start process' next (I/O) burst */
@@ -199,7 +198,7 @@ void moveRunningProcesses(void) {
                 the current time step, we need to add 1 to the runtime */
                 cpus[i] = NULL;
             }
-            /*if the process CPU bursts is not finished but the timeQuantum has reached 0, move the unfinished process to the preemptive buffer array for READY queue and reset its timeQuantum to the old user-inputted timeQuantum*/
+            /*INTERRUPTING transition: if the process CPU bursts is not finished but the timeQuantum has reached 0, move the unfinished process to the preemptive buffer array for READY queue and reset its timeQuantum to the old user-inputted timeQuantum*/
             else if(cpus[i]->quantumRemaining == 0){
  				preemptive[num] = cpus[i];
  				preemptive[num]->quantumRemaining = timeQuantum;
@@ -210,7 +209,7 @@ void moveRunningProcesses(void) {
         }
     }
     // sort preemptive processes by process ID's and enqueue in the ready queue
- 	qsort(preemptive, num, sizeof(process*), compareProcessPointers);
+ 	//qsort(preemptive, num, sizeof(process*), compareProcessPointers);
  	for (j = 0; j < num; j++){
  		enqueueProcess(&readyQueue, preemptive[j]);
  	}
@@ -298,7 +297,6 @@ int main(int argc, char *argv[]) {
         - no more processes await entry into the system
         - there are no waiting processes
         */
-        printf("Running processes:%d Unarriving processes:%d WaitingQ processes%d\n",runningProcesses(),incomingProcesses(),waitingQueue.size);
         if (runningProcesses() == 0 &&
         incomingProcesses() == 0 &&
         waitingQueue.size == 0) break;
